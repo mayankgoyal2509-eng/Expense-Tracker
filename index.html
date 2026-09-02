@@ -118,6 +118,9 @@
   .item .edit { background: none; border: none; color: var(--ink-faint); cursor: pointer; padding: 2px; flex-shrink: 0; display: flex; align-items: center; }
   .item .edit svg { width: 15px; height: 15px; }
   .item .edit:hover { color: var(--ink); }
+  .item .refund { background: none; border: none; color: var(--ink-faint); cursor: pointer; padding: 2px; flex-shrink: 0; font-size: 15px; line-height: 1; }
+  .item .refund:hover { color: #0f766e; }
+  .item .refund.active { color: #0f766e; }
   .loan-person-header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; margin: 16px 0 6px; padding-bottom:4px; border-bottom: 1px solid var(--line); }
   .loan-person-header:first-child { margin-top: 0; }
   .loan-person-name { font-size: 14px; font-weight: 600; color: var(--ink); }
@@ -367,7 +370,11 @@
             <input type="date" id="summaryFrom" style="flex:1" title="From date">
             <input type="date" id="summaryTo" style="flex:1" title="To date">
           </div>
-          <div class="search-clear mono show" id="summaryClear" style="text-align:right">✕ Clear range (show all-time)</div>
+          <div class="search-bar">
+            <select id="summaryCatFilter"><option value="">All categories</option></select>
+            <select id="summaryModeFilter"><option value="">All modes</option></select>
+          </div>
+          <div class="search-clear mono show" id="summaryClear" style="text-align:right">✕ Clear all filters</div>
         </div>
 
         <div class="totals mono">
@@ -579,6 +586,30 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="refundModal">
+  <div class="modal">
+    <h3 id="refundModalTitle">Record refund</h3>
+    <div class="mono" style="font-size:10px;color:var(--ink-faint);margin-bottom:10px" id="refundOriginalNote"></div>
+    <div class="field">
+      <label class="mono" style="font-size:10px;letter-spacing:0.1em;color:var(--ink-faint);display:block;margin-bottom:4px">REFUND AMOUNT</label>
+      <div class="amount-row serif">
+        <span>₹</span>
+        <input type="number" id="refundAmountInput" placeholder="0.00" inputmode="decimal">
+      </div>
+    </div>
+    <div class="field">
+      <label class="mono" style="font-size:10px;letter-spacing:0.1em;color:var(--ink-faint);display:block;margin-bottom:4px">DATE RECEIVED</label>
+      <input type="date" id="refundDateInput" class="note-input">
+    </div>
+    <div class="err mono" id="refundErr" style="display:none"></div>
+    <div class="mono" style="font-size:10px;color:var(--ink-faint);margin-top:6px">If the refund covers the full amount, this entry is excluded from your totals (shown struck through). A partial refund only counts the leftover amount.</div>
+    <div class="modal-actions">
+      <button class="modal-close" id="refundRemove" style="display:none;color:var(--accent)">Remove refund</button>
+      <button class="modal-close" id="refundClose">Cancel</button>
+      <button class="modal-do" id="refundDo">Save</button>
+    </div>
+  </div>
+</div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -662,6 +693,11 @@ const modeById = id => {
   return { id, label: id, icon: ICONS.other };
 };
 const fmt = n => Number(n).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2});
+// When part or all of an expense is later refunded (returned item etc.), it should
+// count toward totals only for what actually stayed spent — not the original amount.
+function refundAmount(e){ return (e.refund && e.refund.amount) ? e.refund.amount : 0; }
+function netAmount(e){ return Math.max(0, e.amount - refundAmount(e)); }
+function isFullyRefunded(e){ return refundAmount(e) >= e.amount - 0.005; }
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function fmtDateDisplay(d){
   return `${d.getDate()} ${MONTH_ABBR[d.getMonth()]}, ${d.getFullYear()}`;
@@ -786,16 +822,16 @@ function render(){
 
   const tStr = todayStr(), mKey = monthKey();
   const nonContra = expenses.filter(e=>!e.contra);
-  const totalToday = nonContra.filter(e=>new Date(e.date).toDateString()===tStr).reduce((s,e)=>s+e.amount,0);
-  const totalMonth = nonContra.filter(e=>localMonthStr(e.date)===mKey).reduce((s,e)=>s+e.amount,0);
-  const totalAll = nonContra.reduce((s,e)=>s+e.amount,0);
+  const totalToday = nonContra.filter(e=>new Date(e.date).toDateString()===tStr).reduce((s,e)=>s+netAmount(e),0);
+  const totalMonth = nonContra.filter(e=>localMonthStr(e.date)===mKey).reduce((s,e)=>s+netAmount(e),0);
+  const totalAll = nonContra.reduce((s,e)=>s+netAmount(e),0);
   document.getElementById('totalToday').textContent = '₹'+fmt(totalToday);
   document.getElementById('totalMonth').textContent = '₹'+fmt(totalMonth);
   document.getElementById('totalAll').textContent = '₹'+fmt(totalAll);
 
   // category breakdown
   const catMap = {};
-  nonContra.filter(e=>localMonthStr(e.date)===mKey).forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
+  nonContra.filter(e=>localMonthStr(e.date)===mKey).forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+netAmount(e); });
   const catEntries = Object.entries(catMap).sort((a,b)=>b[1]-a[1]);
   const catBd = document.getElementById('catBreakdown');
   const catRows = document.getElementById('catRows');
@@ -810,7 +846,7 @@ function render(){
 
   // mode breakdown
   const modeMap = {};
-  nonContra.filter(e=>localMonthStr(e.date)===mKey).forEach(e=>{ modeMap[e.mode]=(modeMap[e.mode]||0)+e.amount; });
+  nonContra.filter(e=>localMonthStr(e.date)===mKey).forEach(e=>{ modeMap[e.mode]=(modeMap[e.mode]||0)+netAmount(e); });
   const modeEntries = Object.entries(modeMap).sort((a,b)=>b[1]-a[1]);
   const modeBd = document.getElementById('modeBreakdown');
   const modeRows = document.getElementById('modeRows');
@@ -860,13 +896,22 @@ function render(){
       const rows = groups[key].map(e=>{
         const c = catById(e.category), m = modeById(e.mode);
         const tag = e.isLoan ? `<span class="contratag mono" style="color:#7c3aed;border-color:#c4b5fd;background:#f5f3ff">LOAN → ${escapeHtml(e.loanPerson||'')}</span>` : (e.contra ? '<span class="contratag mono">CONTRA</span>' : '');
+        const refundAmt = refundAmount(e);
+        const fullyRefunded = refundAmt > 0 && isFullyRefunded(e);
+        const refundTag = refundAmt > 0
+          ? `<span class="contratag mono" style="color:#0f766e;border-color:#5eead4;background:#f0fdfa">${fullyRefunded?'REFUNDED':'PARTIAL REFUND'}</span>`
+          : '';
+        const amtHtml = refundAmt > 0
+          ? `<span class="amt mono"><span style="text-decoration:line-through;color:var(--ink-faint);font-size:11px;margin-right:4px">₹${fmt(e.amount)}</span>${fullyRefunded ? '' : '₹'+fmt(netAmount(e))}</span>`
+          : `<span class="amt mono">₹${fmt(e.amount)}</span>`;
         return `<div class="item ${e.contra?'contra':''}">
           <span style="width:16px;color:#a8a29e">${c.icon}</span>
-          <span class="note">${escapeHtml(e.note || c.label)}</span>
-          ${tag}
+          <span class="note" style="${fullyRefunded?'text-decoration:line-through;color:var(--ink-faint)':''}">${escapeHtml(e.note || c.label)}</span>
+          ${tag}${refundTag}
           <span class="modetag mono">${m.label}</span>
           <span class="dots"></span>
-          <span class="amt mono">₹${fmt(e.amount)}</span>
+          ${amtHtml}
+          <button class="refund ${refundAmt>0?'active':''}" data-id="${e.id}" title="${refundAmt>0?'Edit refund':'Record refund'}">↩</button>
           <button class="edit" data-id="${e.id}" title="Edit">${ICONS.edit}</button>
           <button class="del" data-id="${e.id}">✕</button>
         </div>`;
@@ -879,6 +924,9 @@ function render(){
     itemsList.querySelectorAll('.edit').forEach(btn=>{
       btn.addEventListener('click', ()=> startEdit(btn.dataset.id));
     });
+    itemsList.querySelectorAll('.refund').forEach(btn=>{
+      btn.addEventListener('click', ()=> openRefundModal(btn.dataset.id));
+    });
   }
   const loadMoreBtn = document.getElementById('loadMoreBtn');
   const remaining = filtered.length - visible.length;
@@ -889,10 +937,11 @@ function render(){
     loadMoreBtn.style.display = 'none';
   }
 
-  // range total (shown when a month filter is active)
+  // range total (shown whenever any filter — search, category, mode, or date — is active)
   const rangeTotalEl = document.getElementById('rangeTotal');
-  if (monthFrom || monthTo){
-    const rangeSum = filtered.filter(e=>!e.contra).reduce((s,e)=>s+e.amount,0);
+  const anyFilterActive = !!(monthFrom || monthTo || filterCat || filterMode || searchText);
+  if (anyFilterActive){
+    const rangeSum = filtered.filter(e=>!e.contra).reduce((s,e)=>s+netAmount(e),0);
     const rangeCount = filtered.length;
     const loanCount = filtered.filter(e=>e.isLoan).length;
     const pureContraCount = filtered.filter(e=>e.contra && !e.isLoan).length;
@@ -900,12 +949,16 @@ function render(){
     if (pureContraCount) excludedParts.push(`${pureContraCount} contra`);
     if (loanCount) excludedParts.push(`${loanCount} loan${loanCount>1?'s':''}`);
     const excludedText = excludedParts.length ? ` (${excludedParts.join(', ')} excluded)` : '';
-    const fromLabel = monthFrom ? fmtDateDisplay(new Date(monthFrom+'T12:00:00')) : 'earliest';
-    const toLabel = monthTo ? fmtDateDisplay(new Date(monthTo+'T12:00:00')) : 'latest';
     rangeTotalEl.style.display = 'flex';
     rangeTotalEl.style.flexDirection = 'column';
     rangeTotalEl.style.gap = '4px';
-    rangeTotalEl.innerHTML = `<span style="color:var(--ink-faint);font-size:11px">${fromLabel} &rarr; ${toLabel}</span><div style="display:flex;justify-content:space-between"><span>${rangeCount} entries${excludedText}</span><b>₹${fmt(rangeSum)}</b></div>`;
+    let rangeLine = '';
+    if (monthFrom || monthTo){
+      const fromLabel = monthFrom ? fmtDateDisplay(new Date(monthFrom+'T12:00:00')) : 'earliest';
+      const toLabel = monthTo ? fmtDateDisplay(new Date(monthTo+'T12:00:00')) : 'latest';
+      rangeLine = `<span style="color:var(--ink-faint);font-size:11px">${fromLabel} &rarr; ${toLabel}</span>`;
+    }
+    rangeTotalEl.innerHTML = `${rangeLine}<div style="display:flex;justify-content:space-between"><span>${rangeCount} entries${excludedText}</span><b>₹${fmt(rangeSum)}</b></div>`;
   } else {
     rangeTotalEl.style.display = 'none';
   }
@@ -1012,6 +1065,65 @@ document.getElementById('expenseLoanPerson').addEventListener('input', ()=>{
     hintEl.textContent = `${name} has past loans with you, all settled.`;
   }
   hintEl.style.display = 'block';
+});
+
+// ---- Refunds (settle an expense against money you got back for it) ----
+let refundExpenseId = null;
+function openRefundModal(id){
+  const e = expenses.find(x=>x.id===id);
+  if (!e) return;
+  refundExpenseId = id;
+  const noteEl = document.getElementById('refundOriginalNote');
+  const c = catById(e.category);
+  noteEl.textContent = `${e.note || c.label} — original amount ₹${fmt(e.amount)}`;
+  const amtInput = document.getElementById('refundAmountInput');
+  const dateInput = document.getElementById('refundDateInput');
+  const removeBtn = document.getElementById('refundRemove');
+  if (e.refund){
+    document.getElementById('refundModalTitle').textContent = 'Edit refund';
+    amtInput.value = e.refund.amount.toFixed(2);
+    dateInput.value = localDateStr(e.refund.date);
+    removeBtn.style.display = 'inline-block';
+  } else {
+    document.getElementById('refundModalTitle').textContent = 'Record refund';
+    amtInput.value = e.amount.toFixed(2);
+    dateInput.value = toDateInputValue(new Date());
+    removeBtn.style.display = 'none';
+  }
+  dateInput.max = toDateInputValue(new Date());
+  document.getElementById('refundErr').style.display = 'none';
+  document.getElementById('refundModal').classList.add('show');
+}
+document.getElementById('refundClose').addEventListener('click', ()=>{
+  document.getElementById('refundModal').classList.remove('show');
+  refundExpenseId = null;
+});
+document.getElementById('refundRemove').addEventListener('click', async ()=>{
+  const e = expenses.find(x=>x.id===refundExpenseId);
+  if (!e){ document.getElementById('refundModal').classList.remove('show'); return; }
+  if (!confirm('Remove this refund? The full original amount will count toward your totals again.')) return;
+  delete e.refund;
+  await saveData();
+  document.getElementById('refundModal').classList.remove('show');
+  refundExpenseId = null;
+  render();
+});
+document.getElementById('refundDo').addEventListener('click', async ()=>{
+  const e = expenses.find(x=>x.id===refundExpenseId);
+  const errEl = document.getElementById('refundErr');
+  if (!e){ document.getElementById('refundModal').classList.remove('show'); return; }
+  const amt = parseFloat(document.getElementById('refundAmountInput').value);
+  if (!amt || amt <= 0){
+    errEl.textContent = 'Enter an amount greater than 0';
+    errEl.style.display = 'block';
+    return;
+  }
+  const dateVal = document.getElementById('refundDateInput').value || toDateInputValue(new Date());
+  e.refund = { amount: Math.min(amt, e.amount), date: dateInputToISO(dateVal) };
+  await saveData();
+  document.getElementById('refundModal').classList.remove('show');
+  refundExpenseId = null;
+  render();
 });
 
 function startEdit(id){
@@ -1157,7 +1269,7 @@ document.getElementById('downloadCsvBtn').addEventListener('click', ()=>{
     const s = String(val ?? '');
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
   };
-  const header = ['Date','Amount (INR)','Category','Payment Mode','Note','Contra'];
+  const header = ['Date','Amount (INR)','Category','Payment Mode','Note','Contra','Refund Amount','Net Amount'];
   const sorted = expenses.slice().sort((a,b)=> new Date(a.date) - new Date(b.date));
   const rows = sorted.map(e=>[
     localDateStr(e.date),
@@ -1165,7 +1277,9 @@ document.getElementById('downloadCsvBtn').addEventListener('click', ()=>{
     catById(e.category).label,
     modeById(e.mode).label,
     e.note || '',
-    e.contra ? 'Yes' : 'No'
+    e.contra ? 'Yes' : 'No',
+    e.refund ? e.refund.amount : '',
+    e.refund ? netAmount(e) : ''
   ]);
   const csv = [header, ...rows].map(r=>r.map(escCsv).join(',')).join('\r\n');
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -1274,21 +1388,42 @@ document.getElementById('tabLoansBtn').addEventListener('click', ()=> showTab('l
 // ---- Summary tab ----
 let summaryFromVal = '';
 let summaryToVal = '';
+let summaryCatVal = '';
+let summaryModeVal = '';
+function populateSummaryFilters(){
+  const catSel = document.getElementById('summaryCatFilter');
+  const modeSel = document.getElementById('summaryModeFilter');
+  while (catSel.options.length > 1) catSel.remove(1);
+  while (modeSel.options.length > 1) modeSel.remove(1);
+  CATEGORIES.forEach(c=>{
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.label;
+    catSel.appendChild(opt);
+  });
+  getRecoveryModes().forEach(m=>{
+    const opt = document.createElement('option');
+    opt.value = m.id; opt.textContent = m.label;
+    modeSel.appendChild(opt);
+  });
+}
 function renderSummary(){
   const filtered = expenses.filter(e=>{
     const eDate = localDateStr(e.date);
     if (summaryFromVal && eDate < summaryFromVal) return false;
     if (summaryToVal && eDate > summaryToVal) return false;
+    if (summaryCatVal && e.category !== summaryCatVal) return false;
+    if (summaryModeVal && e.mode !== summaryModeVal) return false;
     return true;
   });
   const nonContra = filtered.filter(e=>!e.contra);
-  const total = nonContra.reduce((s,e)=>s+e.amount,0);
+  const total = nonContra.reduce((s,e)=>s+netAmount(e),0);
   const loanCount = filtered.filter(e=>e.isLoan).length;
   const pureContraCount = filtered.filter(e=>e.contra && !e.isLoan).length;
+  const anyFilterActive = !!(summaryFromVal || summaryToVal || summaryCatVal || summaryModeVal);
 
   const rangeLabel = (summaryFromVal || summaryToVal)
     ? `${summaryFromVal ? fmtDateDisplay(new Date(summaryFromVal+'T12:00:00')) : 'earliest'} – ${summaryToVal ? fmtDateDisplay(new Date(summaryToVal+'T12:00:00')) : 'latest'}`
-    : 'ALL TIME';
+    : (anyFilterActive ? 'FILTERED' : 'ALL TIME');
   document.getElementById('summaryRangeLabel').textContent = rangeLabel;
   document.getElementById('summaryTotal').textContent = '₹'+fmt(total);
   document.getElementById('summaryCount').textContent = nonContra.length;
@@ -1300,7 +1435,7 @@ function renderSummary(){
   })();
 
   const catMap = {};
-  nonContra.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
+  nonContra.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+netAmount(e); });
   const catEntries = Object.entries(catMap).sort((a,b)=>b[1]-a[1]);
   const catBd = document.getElementById('summaryCatBreakdown');
   const catRows = document.getElementById('summaryCatRows');
@@ -1314,7 +1449,7 @@ function renderSummary(){
   } else { catBd.style.display='none'; }
 
   const modeMap = {};
-  nonContra.forEach(e=>{ modeMap[e.mode]=(modeMap[e.mode]||0)+e.amount; });
+  nonContra.forEach(e=>{ modeMap[e.mode]=(modeMap[e.mode]||0)+netAmount(e); });
   const modeEntries = Object.entries(modeMap).sort((a,b)=>b[1]-a[1]);
   const modeBd = document.getElementById('summaryModeBreakdown');
   const modeRows = document.getElementById('summaryModeRows');
@@ -1329,14 +1464,19 @@ function renderSummary(){
 }
 document.getElementById('summaryFrom').addEventListener('change', (e)=>{ summaryFromVal = e.target.value; renderSummary(); });
 document.getElementById('summaryTo').addEventListener('change', (e)=>{ summaryToVal = e.target.value; renderSummary(); });
+document.getElementById('summaryCatFilter').addEventListener('change', (e)=>{ summaryCatVal = e.target.value; renderSummary(); });
+document.getElementById('summaryModeFilter').addEventListener('change', (e)=>{ summaryModeVal = e.target.value; renderSummary(); });
 document.getElementById('summaryClear').addEventListener('click', ()=>{
-  summaryFromVal=''; summaryToVal='';
+  summaryFromVal=''; summaryToVal=''; summaryCatVal=''; summaryModeVal='';
   document.getElementById('summaryFrom').value='';
   document.getElementById('summaryTo').value='';
+  document.getElementById('summaryCatFilter').value='';
+  document.getElementById('summaryModeFilter').value='';
   renderSummary();
 });
 document.getElementById('summaryFrom').max = toDateInputValue(new Date());
 document.getElementById('summaryTo').max = toDateInputValue(new Date());
+populateSummaryFilters();
 
 // ---- Loans tab ----
 function loanRecovered(loan){
@@ -1971,6 +2111,7 @@ function refreshAfterModesChange(){
   buildLoanModeChips();
   buildRecoveryModeChips();
   populateFilters();
+  populateSummaryFilters();
   render();
   renderModesList();
 }
@@ -2053,6 +2194,7 @@ async function enterApp(user){
   buildLoanModeChips();
   buildRecoveryModeChips();
   populateFilters();
+  populateSummaryFilters();
   render();
 }
 
