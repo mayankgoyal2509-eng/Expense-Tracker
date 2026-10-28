@@ -295,6 +295,11 @@
       <label for="isLoanInput" style="font-size:11px;color:var(--ink-soft);margin:0">This is money I'm lending someone (excluded from totals, tracked in the Loans tab)</label>
     </div>
 
+    <div class="field" style="display:flex;align-items:center;gap:8px;margin-top:10px">
+      <input type="checkbox" id="isCreditInput" style="width:16px;height:16px">
+      <label for="isCreditInput" style="font-size:11px;color:var(--ink-soft);margin:0">This is money I received back (refund, reimbursement, friend's share) — recorded as negative and subtracted from your totals</label>
+    </div>
+
     <div class="field" id="loanPersonField" style="display:none;margin-top:10px">
       <label class="mono">LENDING TO</label>
       <input type="text" id="expenseLoanPerson" class="note-input" placeholder="e.g. Amit" list="personSuggestions" autocomplete="off">
@@ -353,6 +358,7 @@
           </select>
         </div>
         <div class="range-total mono" id="rangeTotal" style="display:none"></div>
+        <button class="btn btn-secondary mono" id="splitRefundBtn" style="width:100%;margin:6px 0;display:none">↩ Split a refund across these filtered entries</button>
         <div class="search-clear mono" id="searchClear">✕ Clear all filters</div>
         <div id="itemsList"></div>
         <button class="btn btn-secondary mono" id="loadMoreBtn" style="width:100%;margin-top:10px;display:none"></button>
@@ -637,6 +643,30 @@
     </div>
   </div>
 </div>
+
+<div class="modal-overlay" id="splitRefundModal">
+  <div class="modal">
+    <h3>Split refund across entries</h3>
+    <div class="mono" style="font-size:10px;color:var(--ink-faint);margin-bottom:10px" id="splitRefundNote"></div>
+    <div class="field">
+      <label class="mono" style="font-size:10px;letter-spacing:0.1em;color:var(--ink-faint);display:block;margin-bottom:4px">TOTAL REFUND AMOUNT</label>
+      <div class="amount-row serif">
+        <span>₹</span>
+        <input type="number" id="splitRefundAmountInput" placeholder="0.00" inputmode="decimal">
+      </div>
+    </div>
+    <div class="field">
+      <label class="mono" style="font-size:10px;letter-spacing:0.1em;color:var(--ink-faint);display:block;margin-bottom:4px">DATE RECEIVED</label>
+      <input type="date" id="splitRefundDateInput" class="note-input">
+    </div>
+    <div class="err mono" id="splitRefundErr" style="display:none"></div>
+    <div class="mono" style="font-size:10px;color:var(--ink-faint);margin-top:6px">Applied oldest-entry-first, adding to any refund already on each entry, never exceeding what's still unrefunded on it. Narrow the list with filters/search first so only the right entries are included.</div>
+    <div class="modal-actions">
+      <button class="modal-close" id="splitRefundClose">Cancel</button>
+      <button class="modal-do" id="splitRefundDo">Save</button>
+    </div>
+  </div>
+</div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -723,8 +753,19 @@ const fmt = n => Number(n).toLocaleString('en-IN', {minimumFractionDigits:2, max
 // When part or all of an expense is later refunded (returned item etc.), it should
 // count toward totals only for what actually stayed spent — not the original amount.
 function refundAmount(e){ return (e.refund && e.refund.amount) ? e.refund.amount : 0; }
-function netAmount(e){ return Math.max(0, e.amount - refundAmount(e)); }
+// The 0-floor here only applies to the old per-entry refund feature on a normal
+// (positive) expense — a refund can't push it below zero. A genuine negative
+// entry (money received back, logged directly as its own credit line) is never
+// clamped: it's meant to reduce totals, that's the entire point of it.
+function netAmount(e){ return e.amount < 0 ? e.amount : Math.max(0, e.amount - refundAmount(e)); }
 function isFullyRefunded(e){ return refundAmount(e) >= e.amount - 0.005; }
+// For breakdown rows, which can go negative once credit/refund entries are
+// netted into a category or mode's total — shown as "-₹X" in green rather
+// than the odd "₹-X" a locale-formatted negative number would otherwise give.
+function fmtSignedAmt(amt){
+  if (amt < 0) return `<span style="color:#15803d">-₹${fmt(Math.abs(amt))}</span>`;
+  return `₹${fmt(amt)}`;
+}
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function fmtDateDisplay(d){
   return `${d.getDate()} ${MONTH_ABBR[d.getMonth()]}, ${d.getFullYear()}`;
@@ -755,6 +796,7 @@ let monthFrom = '';
 let monthTo = '';
 let filterRefund = '';
 let filterContra = '';
+let lastFilteredExpenses = [];
 let visibleLimit = 25;
 const PAGE_SIZE = 25;
 
@@ -855,9 +897,9 @@ function render(){
   const totalToday = nonContra.filter(e=>new Date(e.date).toDateString()===tStr).reduce((s,e)=>s+netAmount(e),0);
   const totalMonth = nonContra.filter(e=>localMonthStr(e.date)===mKey).reduce((s,e)=>s+netAmount(e),0);
   const totalAll = nonContra.reduce((s,e)=>s+netAmount(e),0);
-  document.getElementById('totalToday').textContent = '₹'+fmt(totalToday);
-  document.getElementById('totalMonth').textContent = '₹'+fmt(totalMonth);
-  document.getElementById('totalAll').textContent = '₹'+fmt(totalAll);
+  document.getElementById('totalToday').textContent = (n=>n<0?'-₹'+fmt(Math.abs(n)):'₹'+fmt(n))(totalToday);
+  document.getElementById('totalMonth').textContent = (n=>n<0?'-₹'+fmt(Math.abs(n)):'₹'+fmt(n))(totalMonth);
+  document.getElementById('totalAll').textContent = (n=>n<0?'-₹'+fmt(Math.abs(n)):'₹'+fmt(n))(totalAll);
 
   // category breakdown
   const catMap = {};
@@ -869,8 +911,8 @@ function render(){
     catBd.style.display='block';
     catRows.innerHTML = catEntries.map(([id,amt])=>{
       const c = catById(id);
-      const pct = totalMonth ? Math.max((amt/totalMonth)*100,4) : 4;
-      return `<div class="bd-row"><span style="width:16px">${c.icon}</span><span class="name mono">${c.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">₹${fmt(amt)}</span></div>`;
+      const pct = (totalMonth && amt > 0) ? Math.max((amt/totalMonth)*100,4) : 0;
+      return `<div class="bd-row"><span style="width:16px">${c.icon}</span><span class="name mono">${c.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">${fmtSignedAmt(amt)}</span></div>`;
     }).join('');
   } else { catBd.style.display='none'; }
 
@@ -884,8 +926,8 @@ function render(){
     modeBd.style.display='block';
     modeRows.innerHTML = modeEntries.map(([id,amt])=>{
       const m = modeById(id);
-      const pct = totalMonth ? Math.max((amt/totalMonth)*100,4) : 4;
-      return `<div class="bd-row mode"><span style="width:16px">${m.icon}</span><span class="name mono">${m.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">₹${fmt(amt)}</span></div>`;
+      const pct = (totalMonth && amt > 0) ? Math.max((amt/totalMonth)*100,4) : 0;
+      return `<div class="bd-row mode"><span style="width:16px">${m.icon}</span><span class="name mono">${m.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">${fmtSignedAmt(amt)}</span></div>`;
     }).join('');
   } else { modeBd.style.display='none'; }
 
@@ -910,6 +952,7 @@ function render(){
     }
     return true;
   });
+  lastFilteredExpenses = filtered;
   const groups = {};
   const filteredSorted = filtered.slice().sort((a,b)=> new Date(b.date) - new Date(a.date));
   const visible = filteredSorted.slice(0, visibleLimit);
@@ -933,23 +976,32 @@ function render(){
       else label = fmtDateDisplay(d).toUpperCase();
       const rows = groups[key].map(e=>{
         const c = catById(e.category), m = modeById(e.mode);
+        const isCredit = e.amount < 0;
         const tag = e.isLoan ? `<span class="contratag mono" style="color:#7c3aed;border-color:#c4b5fd;background:#f5f3ff">LOAN → ${escapeHtml(e.loanPerson||'')}</span>` : (e.contra ? '<span class="contratag mono">CONTRA</span>' : '');
         const refundAmt = refundAmount(e);
         const fullyRefunded = refundAmt > 0 && isFullyRefunded(e);
         const refundTag = refundAmt > 0
           ? `<span class="contratag mono" style="color:#0f766e;border-color:#5eead4;background:#f0fdfa">${fullyRefunded?'REFUNDED':'PARTIAL REFUND'}</span>`
           : '';
-        const amtHtml = refundAmt > 0
-          ? `<span class="amt mono"><span style="text-decoration:line-through;color:var(--ink-faint);font-size:11px;margin-right:4px">₹${fmt(e.amount)}</span>${fullyRefunded ? '' : '₹'+fmt(netAmount(e))}</span>`
-          : `<span class="amt mono">₹${fmt(e.amount)}</span>`;
+        const creditTag = isCredit
+          ? '<span class="contratag mono" style="color:#15803d;border-color:#86efac;background:#f0fdf4">RECEIVED</span>'
+          : '';
+        const amtHtml = isCredit
+          ? `<span class="amt mono" style="color:#15803d">-₹${fmt(Math.abs(e.amount))}</span>`
+          : (refundAmt > 0
+            ? `<span class="amt mono"><span style="text-decoration:line-through;color:var(--ink-faint);font-size:11px;margin-right:4px">₹${fmt(e.amount)}</span>${fullyRefunded ? '' : '₹'+fmt(netAmount(e))}</span>`
+            : `<span class="amt mono">₹${fmt(e.amount)}</span>`);
+        // Refunding a "money received back" entry doesn't make sense, so that
+        // button is left off for credits — editing/deleting the entry covers it.
+        const refundBtn = isCredit ? '' : `<button class="refund ${refundAmt>0?'active':''}" data-id="${e.id}" title="${refundAmt>0?'Edit refund':'Record refund'}">↩</button>`;
         return `<div class="item ${e.contra?'contra':''}">
           <span style="width:16px;color:#a8a29e">${c.icon}</span>
           <span class="note" style="${fullyRefunded?'text-decoration:line-through;color:var(--ink-faint)':''}">${escapeHtml(e.note || c.label)}</span>
-          ${tag}${refundTag}
+          ${tag}${refundTag}${creditTag}
           <span class="modetag mono">${m.label}</span>
           <span class="dots"></span>
           ${amtHtml}
-          <button class="refund ${refundAmt>0?'active':''}" data-id="${e.id}" title="${refundAmt>0?'Edit refund':'Record refund'}">↩</button>
+          ${refundBtn}
           <button class="edit" data-id="${e.id}" title="Edit">${ICONS.edit}</button>
           <button class="del" data-id="${e.id}">✕</button>
         </div>`;
@@ -996,10 +1048,11 @@ function render(){
       const toLabel = monthTo ? fmtDateDisplay(new Date(monthTo+'T12:00:00')) : 'latest';
       rangeLine = `<span style="color:var(--ink-faint);font-size:11px">${fromLabel} &rarr; ${toLabel}</span>`;
     }
-    rangeTotalEl.innerHTML = `${rangeLine}<div style="display:flex;justify-content:space-between"><span>${rangeCount} entries${excludedText}</span><b>₹${fmt(rangeSum)}</b></div>`;
+    rangeTotalEl.innerHTML = `${rangeLine}<div style="display:flex;justify-content:space-between"><span>${rangeCount} entries${excludedText}</span><b>${fmtSignedAmt(rangeSum)}</b></div>`;
   } else {
     rangeTotalEl.style.display = 'none';
   }
+  document.getElementById('splitRefundBtn').style.display = (anyFilterActive && filtered.length > 0) ? 'block' : 'none';
 
   document.getElementById('searchClear').classList.toggle('show', !!(searchText||filterCat||filterMode||monthFrom||monthTo));
 
@@ -1115,6 +1168,20 @@ document.getElementById('dateInput').addEventListener('change', checkDuplicateHi
 document.getElementById('isLoanInput').addEventListener('change', (e)=>{
   document.getElementById('loanPersonField').style.display = e.target.checked ? 'block' : 'none';
   if (e.target.checked) populatePersonSuggestions();
+  if (e.target.checked) document.getElementById('isCreditInput').checked = false;
+});
+
+// ---- "Money received back" checkbox — mutually exclusive with contra/loan,
+// since a credit isn't also a same-account transfer or money lent out. ----
+document.getElementById('isCreditInput').addEventListener('change', (e)=>{
+  if (e.target.checked){
+    document.getElementById('contraInput').checked = false;
+    document.getElementById('isLoanInput').checked = false;
+    document.getElementById('loanPersonField').style.display = 'none';
+  }
+});
+document.getElementById('contraInput').addEventListener('change', (e)=>{
+  if (e.target.checked) document.getElementById('isCreditInput').checked = false;
 });
 document.getElementById('expenseLoanPerson').addEventListener('input', ()=>{
   const name = document.getElementById('expenseLoanPerson').value.trim();
@@ -1190,6 +1257,63 @@ document.getElementById('refundDo').addEventListener('click', async ()=>{
   render();
 });
 
+// ---- Split a refund across multiple entries (e.g. one lump reimbursement
+// covering several separate trip expenses you originally paid for in full) ----
+document.getElementById('splitRefundBtn').addEventListener('click', ()=>{
+  const targets = lastFilteredExpenses.filter(e=>!e.contra && e.amount > 0);
+  const totalOriginal = targets.reduce((s,e)=>s+e.amount,0);
+  const totalAlreadyRefunded = targets.reduce((s,e)=>s+refundAmount(e),0);
+  const capacity = targets.reduce((s,e)=>s+netAmount(e),0);
+  document.getElementById('splitRefundNote').textContent =
+    `${targets.length} filtered entr${targets.length===1?'y':'ies'} — ₹${fmt(totalOriginal)} total, ₹${fmt(totalAlreadyRefunded)} already refunded, ₹${fmt(capacity)} still refundable.`;
+  document.getElementById('splitRefundAmountInput').value = capacity > 0 ? capacity.toFixed(2) : '';
+  document.getElementById('splitRefundDateInput').value = toDateInputValue(new Date());
+  document.getElementById('splitRefundDateInput').max = toDateInputValue(new Date());
+  document.getElementById('splitRefundErr').style.display = 'none';
+  document.getElementById('splitRefundModal').classList.add('show');
+});
+document.getElementById('splitRefundClose').addEventListener('click', ()=>{
+  document.getElementById('splitRefundModal').classList.remove('show');
+});
+document.getElementById('splitRefundDo').addEventListener('click', async ()=>{
+  const errEl = document.getElementById('splitRefundErr');
+  const amt = parseFloat(document.getElementById('splitRefundAmountInput').value);
+  if (!amt || amt <= 0){
+    errEl.textContent = 'Enter an amount greater than 0';
+    errEl.style.display = 'block';
+    return;
+  }
+  const dateVal = document.getElementById('splitRefundDateInput').value || toDateInputValue(new Date());
+  const isoDate = dateInputToISO(dateVal);
+  // Oldest entry first, topping up any refund already on it, capped at what's
+  // still unrefunded on that entry — mirrors how loan bulk-settle spreads a
+  // lump payment across multiple loans.
+  const targets = lastFilteredExpenses.filter(e=>!e.contra && e.amount > 0 && netAmount(e) > 0.01)
+    .sort((a,b)=> new Date(a.date) - new Date(b.date));
+  if (targets.length === 0){
+    errEl.textContent = 'None of the filtered entries have any refundable amount left';
+    errEl.style.display = 'block';
+    return;
+  }
+  let remaining = amt;
+  let touchedCount = 0;
+  for (const e of targets){
+    if (remaining <= 0.01) break;
+    const cap = netAmount(e);
+    const applied = Math.min(remaining, cap);
+    if (applied <= 0) continue;
+    e.refund = { amount: refundAmount(e) + applied, date: isoDate };
+    remaining -= applied;
+    touchedCount += 1;
+  }
+  await saveData();
+  document.getElementById('splitRefundModal').classList.remove('show');
+  render();
+  if (remaining > 0.01){
+    alert(`Applied ₹${fmt(amt - remaining)} across ${touchedCount} entr${touchedCount===1?'y':'ies'}. ₹${fmt(remaining)} couldn't be placed — the filtered entries don't have that much refundable amount left. Narrow or widen your filter and try again for the rest.`);
+  }
+});
+
 function startEdit(id){
   const e = expenses.find(x=>x.id===id);
   if (!e) return;
@@ -1197,11 +1321,12 @@ function startEdit(id){
   selectedCategory = e.category;
   selectedMode = e.mode;
   buildChips();
-  document.getElementById('amountInput').value = e.amount;
+  document.getElementById('amountInput').value = Math.abs(e.amount);
   document.getElementById('noteInput').value = e.note || '';
   document.getElementById('dateInput').value = toDateInputValue(new Date(e.date));
   document.getElementById('contraInput').checked = !!e.contra;
   document.getElementById('isLoanInput').checked = !!e.isLoan;
+  document.getElementById('isCreditInput').checked = e.amount < 0;
   document.getElementById('loanPersonField').style.display = e.isLoan ? 'block' : 'none';
   document.getElementById('expenseLoanPerson').value = e.loanPerson || '';
   document.getElementById('expenseLoanHint').style.display = 'none';
@@ -1219,6 +1344,7 @@ function resetForm(){
   document.getElementById('dateInput').value = toDateInputValue(new Date());
   document.getElementById('contraInput').checked = false;
   document.getElementById('isLoanInput').checked = false;
+  document.getElementById('isCreditInput').checked = false;
   document.getElementById('loanPersonField').style.display = 'none';
   document.getElementById('expenseLoanPerson').value = '';
   document.getElementById('expenseLoanHint').style.display = 'none';
@@ -1258,13 +1384,15 @@ document.getElementById('saveBtn').addEventListener('click', async ()=>{
     return;
   }
   const contraVal = document.getElementById('contraInput').checked || isLoanVal;
+  const isCreditVal = document.getElementById('isCreditInput').checked;
+  const signedVal = isCreditVal ? -Math.abs(val) : val;
 
   if (editingId){
     const idx = expenses.findIndex(e=>e.id===editingId);
     if (idx !== -1){
       const isoDate = dateInputToISO(dateVal, expenses[idx].date);
       const wasLoan = !!expenses[idx].isLoan;
-      expenses[idx] = { ...expenses[idx], amount: val, category: selectedCategory, mode: selectedMode, note: note, date: isoDate, contra: contraVal, isLoan: isLoanVal, loanPerson: isLoanVal ? loanPersonVal : null };
+      expenses[idx] = { ...expenses[idx], amount: signedVal, category: selectedCategory, mode: selectedMode, note: note, date: isoDate, contra: contraVal, isLoan: isLoanVal, loanPerson: isLoanVal ? loanPersonVal : null };
       // Keep a linked loan entry in sync if this expense is (or was) a loan
       if (isLoanVal){
         const linkedIdx = loans.findIndex(l=>l.linkedExpenseId === editingId);
@@ -1282,7 +1410,7 @@ document.getElementById('saveBtn').addEventListener('click', async ()=>{
     const isoDate = dateInputToISO(dateVal);
     expenses.unshift({
       id: newId,
-      amount: val,
+      amount: signedVal,
       category: selectedCategory,
       mode: selectedMode,
       note: note,
@@ -1493,7 +1621,7 @@ function renderSummary(){
     ? `${summaryFromVal ? fmtDateDisplay(new Date(summaryFromVal+'T12:00:00')) : 'earliest'} – ${summaryToVal ? fmtDateDisplay(new Date(summaryToVal+'T12:00:00')) : 'latest'}`
     : (anyFilterActive ? 'FILTERED' : 'ALL TIME');
   document.getElementById('summaryRangeLabel').textContent = rangeLabel;
-  document.getElementById('summaryTotal').textContent = '₹'+fmt(total);
+  document.getElementById('summaryTotal').textContent = (n=>n<0?'-₹'+fmt(Math.abs(n)):'₹'+fmt(n))(total);
   document.getElementById('summaryCount').textContent = nonContra.length;
   document.getElementById('summaryContraNote').textContent = (()=>{
     const parts = [];
@@ -1511,8 +1639,8 @@ function renderSummary(){
     catBd.style.display='block';
     catRows.innerHTML = catEntries.map(([id,amt])=>{
       const c = catById(id);
-      const pct = total ? Math.max((amt/total)*100,4) : 4;
-      return `<div class="bd-row"><span style="width:16px">${c.icon}</span><span class="name mono">${c.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">₹${fmt(amt)}</span></div>`;
+      const pct = (total && amt > 0) ? Math.max((amt/total)*100,4) : 0;
+      return `<div class="bd-row"><span style="width:16px">${c.icon}</span><span class="name mono">${c.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">${fmtSignedAmt(amt)}</span></div>`;
     }).join('');
   } else { catBd.style.display='none'; }
 
@@ -1525,8 +1653,8 @@ function renderSummary(){
     modeBd.style.display='block';
     modeRows.innerHTML = modeEntries.map(([id,amt])=>{
       const m = modeById(id);
-      const pct = total ? Math.max((amt/total)*100,4) : 4;
-      return `<div class="bd-row mode"><span style="width:16px">${m.icon}</span><span class="name mono">${m.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">₹${fmt(amt)}</span></div>`;
+      const pct = (total && amt > 0) ? Math.max((amt/total)*100,4) : 0;
+      return `<div class="bd-row mode"><span style="width:16px">${m.icon}</span><span class="name mono">${m.label}</span><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div><span class="val mono">${fmtSignedAmt(amt)}</span></div>`;
     }).join('');
   } else { modeBd.style.display='none'; }
 }
